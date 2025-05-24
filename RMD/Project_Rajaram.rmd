@@ -1,0 +1,279 @@
+---
+title: "Survival outcomes in HIV patients unresponsive to zidovudine"
+author: "Shri Vishalini Rajaram"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+    toc: false
+    fig_caption: true
+    fig_width: 3
+    fig_height: 2
+    keep_tex: true
+fontsize: 11pt
+geometry: margin=0.5in
+linestretch: 1
+header-includes:
+  - \usepackage{float}
+  - \usepackage{graphicx}
+  - \usepackage{subcaption}
+  - \usepackage{titlesec}
+  - \titlespacing\section{0pt}{1.5ex plus 0.5ex minus .2ex}{1ex}
+  - \titlespacing\subsection{0pt}{1ex plus 0.3ex minus .2ex}{0.8ex}
+  - \usepackage{titling}
+  - \setlength{\droptitle}{-2em}
+  - \pretitle{\vspace{-1em}\begin{center}\LARGE\bfseries}
+  - \posttitle{\end{center}\vspace{0.1em}}
+  - \preauthor{\begin{center}\large}
+  - \postauthor{\end{center}\vspace{-0.1em}}
+  - \predate{\begin{center}\normalsize}
+  - \postdate{\end{center}\vspace{-0.1em}}
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+# Global chunk options
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,    
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 3,
+  fig.height = 2,
+  fig.pos = 'H',
+  fig.cap = "auto",
+  results = 'asis'
+)
+
+# Load required libraries
+library(tidyverse)      # Data wrangling and plotting
+library(survival)       # Core survival analysis
+library(survminer)      # Kaplan-Meier plots and diagnostics
+library(splines)        # Natural splines for functional form checks
+library(JM)             # For data (aids.id and aids)
+library(kableExtra)     # Nicely formatted tables
+library(gt)             # Publication-quality tables (optional)
+library(broom)          # Tidy model outputs
+set.seed(1995)
+```
+
+```{r child='Codes_Rajaram.rmd', echo=FALSE, eval=TRUE, include=FALSE}
+
+```
+
+# Introduction
+
+Understanding the survival outcomes of HIV-positive patients following treatment failure is crucial for optimizing antiretroviral strategies. This study analyzes data from a randomized clinical trial comparing two second-line therapies, didanosine (ddI) and zalcitabine (ddC), administered after zidovudine (AZT) intolerance or failure. Leveraging both baseline and longitudinal data structures, we evaluate patient characteristics, compare survival curves, and apply time-independent and time-dependent Cox models as well as parametric accelerated failure time (AFT) models to assess treatment effects, covariate influences, and model assumptions. A reproducible subset of 400 patients was selected using a fixed seed (`set.seed(1995)`) to ensure consistency in all statistical analyses and model diagnostics.
+
+# Analysis Rationale
+
+We adopted a hierarchical modeling strategy grounded in survival analysis principles to evaluate time-to-event outcomes. Kaplan–Meier estimation was used to visualize unadjusted survival by treatment group without imposing distributional assumptions. We then fit time-independent Cox models beginning with main effects, using martingale residuals to assess the functional form of CD4, and stepwise selection to identify parsimonious interaction structures. DFBETAs and Schoenfeld residuals were used to evaluate model influence and proportionality. To incorporate longitudinal variation in immune status, we extended the Cox model using a time-varying formulation with start–stop intervals for CD4. Finally, parametric AFT models with Weibull and log-normal distributions were fit to assess robustness under alternative assumptions and estimate direct effects on survival time.
+
+# Data description
+
+Baseline characteristics were examined to understand the distribution of clinical and demographic factors across treatment groups. CD4 count ranged widely across patients, and both treatment arms exhibited comparable distributions in gender, prior infection status, and AZT failure versus intolerance. These summaries are provided in **Table 1**, which highlights no major imbalances between ddC and ddI groups. Given the observed differences in death proportions and follow-up durations, we next employed non-parametric methods to explore survival trends without imposing distributional assumptions.
+
+# Evaluating without assumptions
+
+To understand survival distributions without assuming a parametric form, we first estimated Kaplan-Meier survival curves without any covariates and then another model stratified by treatment arm. As shown in **Figure 1**, the survival probabilities declined steadily, but did not go below 0.5. Given this, it was not possible to calculate the median and the upper confidence intervals in the model. When stratified by treatment group, the ddC arm exhibited consistently higher survival probabilities than the ddI arm across the follow-up period, although the confidence intervals began to overlap toward the end. Also, the mean survival times varied greatly between the null model, and the two treatment groups highlights there is a change in treatment efficacy, prompting the need for multivariable modeling. We next fit Cox proportional hazards models to formally quantify the effect of treatment while adjusting for baseline covariates.
+
+
+```{r table1, echo=FALSE, message=FALSE, warning=FALSE}
+# ---- Continuous Variables Summary ----
+cont_data <- myaids.id %>%
+  group_by(drug) %>%
+  summarise(
+    `Time (mean ± SD)` = paste0(round(mean(Time), 1), " ± ", round(sd(Time), 1)),
+    `CD4 (mean ± SD)` = paste0(round(mean(CD4), 1), " ± ", round(sd(CD4), 1)),
+    `Deaths (%)` = paste0(sum(death), " (", round(mean(death) * 100, 1), "%)"),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(-drug, names_to = "Variable", values_to = "Value") %>%
+  pivot_wider(names_from = drug, values_from = Value) %>%
+  mutate(Subcategory = "") %>%
+  relocate(Variable, Subcategory)
+
+# ---- Categorical Variables Summary ----
+cat_vars <- list(
+  "Gender" = "gender",
+  "Previous Infection" = "prevOI",
+  "AZT" = "AZT"
+)
+
+cat_data <- map_dfr(names(cat_vars), function(var_label) {
+  var_name <- cat_vars[[var_label]]
+  levels <- levels(myaids.id[[var_name]])
+  
+  map_dfr(levels, function(lvl) {
+    tab <- myaids.id %>%
+      filter(.data[[var_name]] == lvl) %>%
+      count(drug) %>%
+      pivot_wider(names_from = drug, values_from = n, values_fill = 0)
+    
+    tibble(
+      Variable = var_label,
+      Subcategory = lvl,
+      `ddC` = tab$ddC,
+      `ddI` = tab$ddI
+    )
+  })
+})
+
+cat_data <- cat_data %>%
+  mutate(across(where(is.numeric), as.character))
+
+# ---- Combine and Clean ----
+table1 <- bind_rows(cont_data, cat_data) %>%
+  dplyr::select(Variable, Subcategory, ddC = ddC, ddI = ddI)
+
+table1 <- table1 %>%
+  mutate(
+    Variable = ifelse(duplicated(Variable), "", Variable)
+  )
+
+# ---- Create gt Table ----
+table1 %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 1. Baseline Characteristics by Treatment Group (ddC vs ddI)**")
+  ) %>%
+  cols_label(
+    Variable = "Variable",
+    Subcategory = "Subcategory",
+    ddC = "ddC",
+    ddI = "ddI"
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  ) %>%
+  tab_options(
+    table.font.size = "x-small",
+    data_row.padding = px(0),
+    table.width = pct(100)
+  )
+```
+
+
+
+```{r KMcurve, fig.cap = "Kaplan–Meier survival curves with 95% confidence intervals for overall and drug-specific survival (ddC vs ddI). Dashed lines: mean survival; solid lines: median survival. Overall is shown in black. NA values were found for Median and Upper CI", fig.align = "center", fig.width = 4.8, fig.height = 2.5, dpi = 600, echo=FALSE}
+# Extract survival data
+df_all <- surv_summary(km_fit, data = myaids.id) %>%
+  mutate(group = "Overall")
+
+df_drug <- surv_summary(km_fit_drug, data = myaids.id) %>%
+  mutate(group = strata) %>%
+  mutate(group = gsub("drug=", "", group))
+
+# Combine
+km_data <- bind_rows(df_all, df_drug)
+
+vlines <- bind_rows(
+  get_stats(km_fit, "Overall"),
+  get_stats(km_fit_drug, "ddC"),
+  get_stats(km_fit_drug, "ddI")
+) %>% pivot_longer(cols = c(rmean, median), names_to = "type", values_to = "time") %>%
+  mutate(linetype = ifelse(type == "median", "solid", "dashed"))
+
+# Color map
+color_map <- c("ddC" = "#E69F00", "ddI" = "#008080", "Overall" = "black")
+
+# Plot
+ggplot(km_data, aes(x = time, y = surv, color = group)) +
+  geom_step(linewidth = 0.6) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = group), alpha = 0.2, color = NA) +
+  geom_point(data = filter(km_data, n.censor > 0), aes(x = time, y = surv), shape = 3, size = 0.7) +
+  geom_vline(data = vlines, aes(xintercept = time, color = group, linetype = linetype), linewidth = 0.6) +
+  scale_color_manual(values = color_map) +
+  scale_fill_manual(values = color_map) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0.01, 0)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_linetype_manual(values = c("solid" = "solid", "dashed" = "dashed"),
+                        labels = c("solid" = "Median", "dashed" = "Mean")) +
+  labs(x = "Time (months)", y = "Survival probability", color = "Group", linetype = "Line Type") +
+  theme_classic(base_size = 7)
+```
+
+# Proportional hazards models
+
+## In a time-independent setting
+
+The time-independent Cox model, selected via stepwise procedure, included five main effects and sixteen interactions (AIC = 1734.90; concordance = 0.737) (Comparison values in Appendix: **Table A1**). CD4 and prior opportunistic infection (prevOI) were significant main effects, while gender, AZT failure, and antiretroviral drug treatment contributed primarily through interactions. CD4 was more protective in patients with prior AIDS-related illness (CD4 $\times$ prevOI; $\beta = -0.779$, $p = 0.0105$), but less so in those with AZT failure (CD4 $\times$ AZT; $\beta = 0.654$, $p = 0.0229$). Although the main effect of ddI was large ($\beta = 10.61$, $p = 0.0625$), this estimate was unstable and likely confounded by high-order interactions and sparse subgroup events. Specifically, a four-way interaction (CD4 $\times$ drug $\times$ gender $\times$ AZT; $\beta = -1.253$, $p = 0.0193$) identified a high-risk subgroup, male patients on ddI with AZT failure and low CD4, for whom ddI appeared to mitigate risk, suggesting its clinical utility may be conditional on immune and treatment status.
+
+Linearity was assessed using martingale residuals after fitting the main effects model; both raw and log-transformed CD4 exhibited acceptable linearity, but raw CD4 was retained due to a lower AIC (**Figure 2A-B**). DFBETA diagnostics identified subjects 244, 298, and 347 as influential for interaction terms involving drug, gender, and AZT, but no observations were removed, as these effects were biologically plausible (Appendix: **Table A2**). Schoenfeld residuals revealed no significant violations of the proportional hazards assumption for individual terms (all $p > ~ 0.27$). The global test was borderline significant ($\chi^2 = 44.4$, df = 21, $p = 0.0021$), suggesting minor cumulative deviations but no evidence of substantial non-proportionality (Appendix **Table A3**). While the time-independent Cox model identified important baseline and interaction effects, it assumes proportional hazards and static covariates. This limits its ability to capture longitudinal changes in CD4 and evolving risk profiles. To address these constraints, we next apply time-dependent Cox models and AFT models, which allow for time-varying covariates and provide alternative assumptions about the event-time distribution.
+Final selected model equation:
+
+\[
+\begin{aligned}
+\log h(t \mid X) =\; & \; 0.567 \cdot \text{CD4} + 10.610 \cdot \text{drug}_{\text{ddI}} + 8.893 \cdot \text{gender}_{\text{male}} + 11.550 \cdot \text{prevOI}_{\text{AIDS}} - 2.178 \cdot \text{AZT}_{\text{failure}} \\
+& - 0.638 \cdot (\text{CD4} \times \text{drug}_{\text{ddI}}) - 0.664 \cdot (\text{CD4} \times \text{gender}_{\text{male}}) - 0.779 \cdot (\text{CD4} \times \text{prevOI}_{\text{AIDS}}) \\
+& + 0.654 \cdot (\text{CD4} \times \text{AZT}_{\text{failure}}) - 9.225 \cdot (\text{drug}_{\text{ddI}} \times \text{gender}_{\text{male}}) - 9.217 \cdot (\text{drug}_{\text{ddI}} \times \text{prevOI}_{\text{AIDS}}) \\
+& - 1.686 \cdot (\text{drug}_{\text{ddI}} \times \text{AZT}_{\text{failure}}) - 9.700 \cdot (\text{gender}_{\text{male}} \times \text{prevOI}_{\text{AIDS}}) + 2.663 \cdot (\text{gender}_{\text{male}} \times \text{AZT}_{\text{failure}}) \\
+& + 0.626 \cdot (\text{CD4} \times \text{drug}_{\text{ddI}} \times \text{gender}_{\text{male}}) + 1.262 \cdot (\text{CD4} \times \text{drug}_{\text{ddI}} \times \text{AZT}_{\text{failure}}) \\
+& + 0.756 \cdot (\text{CD4} \times \text{gender}_{\text{male}} \times \text{prevOI}_{\text{AIDS}}) - 0.730 \cdot (\text{CD4} \times \text{gender}_{\text{male}} \times \text{AZT}_{\text{failure}}) \\
+& + 8.012 \cdot (\text{drug}_{\text{ddI}} \times \text{gender}_{\text{male}} \times \text{prevOI}_{\text{AIDS}}) + 1.648 \cdot (\text{drug}_{\text{ddI}} \times \text{gender}_{\text{male}} \times \text{AZT}_{\text{failure}}) \\
+& - 1.253 \cdot (\text{CD4} \times \text{drug}_{\text{ddI}} \times \text{gender}_{\text{male}} \times \text{AZT}_{\text{failure}})
+\end{aligned}
+\]
+
+```{r martingale, fig.cap="Martingale residuals for CD4 and log(CD4) in TI/TD Cox models. Loess fits with 95% CI shown. AIC values are annotated in red.", fig.align="center", fig.width = 6.5, fig.height = 4.2, dpi=600, echo=FALSE}
+
+layout(matrix(1:4, nrow = 2, byrow = TRUE))
+par(mar = c(3.5, 3.5, 2.2, 1), oma = c(2, 2, 1, 1), mgp = c(2, 0.6, 0), tck = -0.02)
+
+# Plot A: TI - CD4
+plot(myaids.id$CD4, mart_full_ti, pch = 20, cex = 0.3, xlab = "", ylab = "", main = "", ylim = c(-1.5, 0.75), xlim = c(0, 20))
+smoothSEcurve(mart_full_ti, myaids.id$CD4)
+mtext("A. TI Cox: CD4", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 15, y = -1.4, labels = paste("AIC =", round(aic_ti_linear, 2)), col = "red", cex = 0.85)
+
+# Plot B: TI - log(CD4)
+plot(log(myaids.id$CD4 + 1), mart_ti_log, pch = 20, cex = 0.3, xlab = "", ylab = "", main = "", ylim = c(-2, 1), xlim = c(0, 3))
+smoothSEcurve(mart_ti_log, log(myaids.id$CD4 + 1))
+mtext("B. TI Cox: log(CD4)", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 2.3, y = -1.9, labels = paste("AIC =", aic_ti_log), col = "red", cex = 0.85)
+
+# Plot C: TD - CD4
+plot(myaids$CD4, mart_td, pch = 20, cex = 0.3, xlab = "", ylab = "", main = "", ylim = c(-1, 1), xlim = c(0, 20))
+smoothSEcurve(mart_td, myaids$CD4)
+mtext("C. TD Cox: CD4", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 15, y = -0.9, labels = paste("AIC =", round(aic_td_linear, 2)), col = "red", cex = 0.85)
+
+# Plot D: TD - log(CD4)
+plot(log(myaids$CD4 + 1), mart_td_log, pch = 20, cex = 0.3, xlab = "", ylab = "", main = "", ylim = c(-1.5, 1), xlim = c(0, 3))
+smoothSEcurve(mart_td_log, log(myaids$CD4 + 1))
+mtext("D. TD Cox: log(CD4)", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 2.3, y = -1.4, labels = paste("AIC =", aic_td_log), col = "red", cex = 0.85)
+
+# Shared axis labels
+mtext("Martingale Residuals", side = 2, outer = TRUE, line = 0.3, cex = 0.8)
+mtext("CD4 or log(CD4 + 1)", side = 1, outer = TRUE, line = 0.3, cex = 0.8)
+```
+
+
+## In a time-dependent setting
+
+The time-dependent Cox model incorporated longitudinal CD4 values using a start–stop structure and yielded a final model with eleven terms (AIC = 1725.31; concordance = 0.733) (Appendix **Table A1**). Unlike the time-independent model, CD4 was no longer a significant main effect ($\beta = -0.122$, $p = 0.203$), indicating that its static prognostic utility was overestimated. However, CD4 retained significance through interactions, particularly with AZT failure (CD4 $\times$ AZT; $\beta = 0.630$, $p = 0.0015$) and in the three-way interaction with gender and AZT failure (CD4 $\times$ gender $\times$ AZT; $\beta = -0.658$, $p = 0.0011$), underscoring that its effect on survival is context-dependent and dynamically modulated by treatment history. ddI was statistically significant as a main effect ($\beta = 1.243$, $p = 0.0087$), indicating increased hazard relative to ddC and also contributed to key interactions associated with reduced hazard in prevOI. These findings suggest that ddI may not improve outcomes uniformly but can be beneficial under specific longitudinal immune and treatment conditions.
+
+\[
+\begin{aligned}
+\log h(t \mid X(t)) =\; & -0.122 \cdot \text{CD4} + 1.243 \cdot \text{drug}_{\text{ddI}} - 0.533 \cdot \text{gender}_{\text{male}} + 2.044 \cdot \text{prevOI}_{\text{AIDS}} \\
+& - 1.565 \cdot \text{AZT}_{\text{failure}} + 0.038 \cdot (\text{CD4} \times \text{gender}_{\text{male}}) - 0.109 \cdot (\text{CD4} \times \text{prevOI}_{\text{AIDS}}) \\
+& + 0.630 \cdot (\text{CD4} \times \text{AZT}_{\text{failure}}) - 1.018 \cdot (\text{drug}_{\text{ddI}} \times \text{prevOI}_{\text{AIDS}}) \\
+& + 1.807 \cdot (\text{gender}_{\text{male}} \times \text{AZT}_{\text{failure}}) - 0.658 \cdot (\text{CD4} \times \text{gender}_{\text{male}} \times \text{AZT}_{\text{failure}})
+\end{aligned}
+\]
+
+Martingale residuals showed that both raw and log-transformed CD4 exhibited similar linearity, raw CD4 was retained due to a lower AIC (**Figure 2C-D**). No observations exceeded the DFBETA threshold of 0.5, indicating absence of influential outliers (Appendix **Table A4**). Schoenfeld residuals showed no significant violations of the proportional hazards assumption for individual covariates with global model was borderline significant but does not suggest any non-proportionality (Appendix **Table A5**). These diagnostics affirm the validity of the fitted time-dependent Cox model. Although the time-dependent Cox model accommodates evolving CD4 levels, it remains constrained by the proportional hazards assumption and relies on partial likelihood estimation. To assess whether alternative survival time distributions yield better fit or reveal distinct time-scale effects, we next evaluate parametric AFT models.
+
+# Parametric AFT models
+
+To relax the proportional hazards assumption and directly model survival time, AFT models were fit using Weibull and log-normal distributions. Both models included baseline covariates and key interactions identified in the Cox models. The Weibull model had the best fit (AIC = 1340.89), slightly outperforming the log-normal model (AIC = 1341.07), and both revealed consistent interaction effects (Appendix **Table A1**). CD4 was not significant individually in either model, but its role was evident through interactions, notably CD4 × AZT failure (log-normal: $\beta = -0.616$, $p = 0.004$; Weibull: $\beta = -0.434$, $p = 0.021$) and CD4 × gender × AZT failure (log-normal: $\beta = 0.697$, $p = 0.0015$; Weibull: $\beta = 0.485$, $p = 0.014$), echoing findings from the time-dependent Cox model. Notably, ddI was associated with significantly prolonged survival relative to ddC (log-normal: $\beta = -0.866$, $p = 0.002$; Weibull: $\beta = -7.183$, $p = 0.054$), reinforcing its therapeutic benefit in AZT-intolerant or treatment-failing patients.
+
+# Discussion
+
+This study evaluated survival among HIV-positive individuals treated with ddI or ddC following AZT failure. Unadjusted Kaplan–Meier curves showed slightly higher survival in the ddC group, but confidence intervals overlapped. In time-independent Cox models, CD4 and prior infection were significant, with ddI associated with modestly increased hazard. However, interaction terms revealed ddI was protective in specific subgroups, particularly male patients with AZT failure and low CD4. The time-dependent model, incorporating updated CD4 values, clarified that its prognostic role emerged through interactions, not as a main effect. ddI remained conditionally beneficial in immunocompromised patients. AFT models further demonstrated significant survival extension with ddI compared to ddC, supporting its clinical utility when time-varying risk factors are properly modeled. These results highlight the importance of using interaction-aware, longitudinally informed models to interpret antiretroviral efficacy.
+
+# Conclusion
+
+The findings of this study are limited by the fixed 400-patient cohort and lack of time-varying data beyond CD4. Drug exposure was restricted to ddI vs ddC and did not reflect adherence or regimen transitions. AZT failure was treated categorically, potentially masking treatment-response gradients. Interaction model complexity and small subgroup sizes may have limited statistical power. Future studies should incorporate virologic markers, adherence metrics, and apply causal methods such as marginal structural models. Joint modeling of CD4 and survival could better capture biological dynamics. Overall, ddI did not improve survival uniformly but showed significant benefit in treatment-experienced, immunosuppressed patients, particularly men with AZT failure and low CD4, underscoring the value of flexible survival models that capture context-specific therapeutic effects.

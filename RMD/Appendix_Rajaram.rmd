@@ -1,0 +1,258 @@
+---
+title: "Appendix Figures and Tables"
+author: "Shri Vishalini Rajaram"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    keep_tex: true
+documentclass: report
+fontsize: 11pt
+geometry: margin=0.5in
+linestretch: 1
+---
+
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+# Global chunk options
+knitr::opts_chunk$set(
+  echo = FALSE,     
+  message = FALSE,    
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 3,
+  fig.height = 2,
+  fig.pos = 'H',
+  fig.cap = "auto",
+  results = 'asis'
+)
+
+# Load required libraries
+library(tidyverse)      # Data wrangling and plotting
+library(survival)       # Core survival analysis
+library(survminer)      # Kaplan-Meier plots and diagnostics
+library(splines)        # Natural splines for functional form checks
+library(JM)             # For data (aids.id and aids)
+library(kableExtra)     # Nicely formatted tables
+library(gt)             # Publication-quality tables (optional)
+library(broom)          # Tidy model outputs
+set.seed(1995)
+```
+
+
+
+```{r child='Codes_Rajaram.rmd', echo=FALSE, eval=TRUE, include=FALSE}
+
+```
+
+
+
+```{r table1a}
+
+# ---- Build Model Comparison Table ----
+model_comp_all <- bind_rows(
+  # Cox Time-Independent
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", Model = "Null", extract_metrics_cox(cox_ti_null)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", Model = "Main Effects", extract_metrics_cox(cox_full_ti_uni)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", Model = "Stepwise", extract_metrics_cox(cox_full_ti_uni_step)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", Model = "Interaction Full", extract_metrics_cox(cox_full_ti_int)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", Model = "Interaction Stepwise", extract_metrics_cox(cox_full_ti_int_step)),
+
+  # Cox Time-Dependent
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", Model = "Null", extract_metrics_cox(cox_td_null)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", Model = "Main Effects", extract_metrics_cox(cox_full_td_uni)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", Model = "Stepwise", extract_metrics_cox(cox_full_td_uni_step)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", Model = "Interaction Full", extract_metrics_cox(cox_full_td_int)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", Model = "Interaction Stepwise", extract_metrics_cox(cox_full_td_int_step)),
+
+  # AFT Weibull
+  cbind(Section = "AFT: Weibull", Model = "Null", extract_metrics_aft(weibull_ti_null)),
+  cbind(Section = "AFT: Weibull", Model = "Main Effects", extract_metrics_aft(weibull_full_ti_uni)),
+  cbind(Section = "AFT: Weibull", Model = "Stepwise", extract_metrics_aft(weibull_full_ti_uni_step)),
+  cbind(Section = "AFT: Weibull", Model = "Interaction Full", extract_metrics_aft(weibull_full_ti_int)),
+  cbind(Section = "AFT: Weibull", Model = "Interaction Stepwise", extract_metrics_aft(weibull_full_ti_int_step)),
+
+  # AFT Log-Normal
+  cbind(Section = "AFT: Log-Normal", Model = "Null", extract_metrics_aft(lognorm_ti_null)),
+  cbind(Section = "AFT: Log-Normal", Model = "Main Effects", extract_metrics_aft(lognorm_full_ti_uni)),
+  cbind(Section = "AFT: Log-Normal", Model = "Stepwise", extract_metrics_aft(lognorm_full_ti_uni_step)),
+  cbind(Section = "AFT: Log-Normal", Model = "Interaction Full", extract_metrics_aft(lognorm_full_ti_int)),
+  cbind(Section = "AFT: Log-Normal", Model = "Interaction Stepwise", extract_metrics_aft(lognorm_full_ti_int_step))
+  ) %>%
+  mutate(row_id = row_number())  # Unique ID for later reference
+
+# ---- Get Row IDs with Lowest AIC in Each Section ----
+highlight_ids <- model_comp_all %>%
+  group_by(Section) %>%
+  filter(AIC == min(AIC, na.rm = TRUE)) %>%
+  pull(row_id)
+```
+
+
+```{r}
+
+# ---- Build GT Table ----
+model_comp_all %>%
+  gt(groupname_col = "Section") %>%
+  tab_header(title = md("**Table A1. Model Comparison: Cox (TI/TD) and Parametric AFT Models**")) %>%
+  fmt_number(columns = c(Log_Likelihood, AIC, Concordance), decimals = 3) %>%
+  cols_label(
+    Model = "Model",
+    Log_Likelihood = "Log-Likelihood",
+    Degrees_of_Freedom = "DF",
+    AIC = "AIC",
+    Concordance = "Concordance (C-index)"
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#d0f0c0"), cell_text(weight = "bold")),
+    locations = cells_body(
+      rows = row_id %in% highlight_ids,
+      columns = AIC
+    )
+  ) %>%
+  tab_options(
+    table.font.size = "x-small",
+    data_row.padding = px(0),
+    table.width = pct(100)
+  ) %>%
+  cols_hide(columns = row_id) %>% as_latex()
+```
+
+
+
+
+```{r}
+# -------------------------------------------------
+# Time independent Cox model - Model Diagnostics
+# -------------------------------------------------
+
+## Influential observations
+# DFBETAs (for each covariate)
+dfb_ti <- residuals(cox_ti_final, type = "dfbeta")
+colnames(dfb_ti) <- names(coef(cox_ti_final))
+dfb_ti_df <- as.data.frame(dfb_ti)
+dfb_ti_df$Observation <- 1:nrow(dfb_ti_df)
+dfb_ti_long <- pivot_longer(dfb_ti_df, -Observation, names_to = "Covariate", values_to = "DFBETA")
+dfb_ti_extreme <- dfb_ti_long %>%
+  filter(abs(DFBETA) > 0.5)
+
+dfb_ti_extreme_summary <- dfb_ti_extreme %>%
+  group_by(Covariate) %>%
+  summarise(
+    n_extreme = n(),
+    Obs_IDs = paste(unique(Observation), collapse = ", "),
+    .groups = "drop"
+  )
+
+dfb_ti_extreme_summary %>%
+  gt() %>%
+  tab_header(title = md("**Table A2: Cox time-independent model - 
+                        Covariates with DFBETA > 0.5**")) %>%
+  cols_label(
+    Covariate = "Covariate",
+    n_extreme = "# Influential Obs",
+    Obs_IDs = "Observation IDs"
+  ) %>%
+  tab_options(table.font.size = "small")
+
+### Proportional hazards assumption validation (Schoenfeld Residuals)
+#### Run cox.zph() to test PH assumption
+ph_ti_test <- cox.zph(cox_ti_final)
+#### Convert cox.zph output to a data frame
+ph_ti_df <- as.data.frame(ph_ti_test$table)
+ph_ti_df$Covariate <- rownames(ph_ti_df)
+colnames(ph_ti_df) <- c("rho", "chisq", "p", "Covariate")
+ph_ti_global <- ph_ti_df[ph_ti_df$Covariate == "GLOBAL", ]
+ph_ti_df <- ph_ti_df[ph_ti_df$Covariate != "GLOBAL", ]
+
+gt(ph_ti_df) %>%
+  gt::tab_header(title = md("**Table A3. Cox time-independent model - 
+                            Schoenfeld Residual Test for Proportional Hazards**")) %>%
+  fmt_number(columns = c("rho", "chisq", "p"), decimals = 4) %>%
+  cols_label(
+    Covariate = "Covariate",
+    rho = "Correlation (ρ)",
+    chisq = "Chi-squared",
+    p = "p-value"
+  ) %>%
+  data_color(
+    columns = vars(p),
+    colors = scales::col_bin(
+      bins = c(0, 0.05, 1), 
+      palette = c("tomato", "gray90")
+    )
+  ) %>%
+  tab_source_note(md(paste0("**GLOBAL TEST**: χ² = ", 
+                            round(ph_ti_global$chisq, 2), 
+                            ", p = ", 
+                            round(ph_ti_global$p, 4))))
+
+## Color	Meaning
+# Tomato	 p < 0.05 → potential PH violation
+# Gray90	 p ≥ 0.05 → no significant violation
+```
+
+
+```{r}
+# -------------------------------------------------
+# Time dependent Cox model - Model Diagnostics
+# -------------------------------------------------
+
+## Influential observations
+# DFBETAs (for each covariate)
+dfb_td <- residuals(cox_td_final, type = "dfbeta")
+colnames(dfb_td) <- names(coef(cox_td_final))
+dfb_td_df <- as.data.frame(dfb_td)
+dfb_td_df$Observation <- 1:nrow(dfb_td_df)
+
+dfb_td_long <- pivot_longer(dfb_td_df, -Observation, names_to = "Covariate", values_to = "DFBETA")
+dfb_td_extreme <- dfb_td_long %>%
+  filter(abs(DFBETA) > 0.5)
+
+dfb_td_extreme_summary <- dfb_td_extreme %>%
+  group_by(Covariate) %>%
+  summarise(
+    n_extreme = n(),
+    Obs_IDs = paste(unique(Observation), collapse = ", "),
+    .groups = "drop"
+  )
+
+dfb_td_extreme_summary %>%
+  gt() %>%
+  tab_header(title = md("**Table A4: Influential Observations in Time-Dependent Cox Model**")) %>%
+  cols_label(
+    Covariate = "Covariate",
+    n_extreme = "# Influential Obs",
+    Obs_IDs = "Observation IDs"
+  ) %>%
+  tab_options(table.font.size = "small")
+
+### Schoenfeld Residual Test for TD
+ph_td_test <- cox.zph(cox_td_final)
+ph_td_df <- as.data.frame(ph_td_test$table)
+ph_td_df$Covariate <- rownames(ph_td_df)
+colnames(ph_td_df) <- c("rho", "chisq", "p", "Covariate")
+ph_td_global <- ph_td_df[ph_td_df$Covariate == "GLOBAL", ]
+ph_td_df <- ph_td_df[ph_td_df$Covariate != "GLOBAL", ]
+
+gt(ph_td_df) %>%
+  tab_header(title = md("**Table A5: Schoenfeld Residuals for TD Cox Model**")) %>%
+  fmt_number(columns = c("rho", "chisq", "p"), decimals = 4) %>%
+  cols_label(
+    Covariate = "Covariate",
+    rho = "Correlation (ρ)",
+    chisq = "Chi-squared",
+    p = "p-value"
+  ) %>%
+  data_color(
+    columns = vars(p),
+    colors = scales::col_bin(bins = c(0, 0.05, 1), palette = c("tomato", "gray90"))
+  ) %>%
+  tab_source_note(md(paste0("**GLOBAL TEST**: χ² = ", 
+                            round(ph_td_global$chisq, 2), 
+                            ", p = ", 
+                            round(ph_td_global$p, 4))))
+```
+
+

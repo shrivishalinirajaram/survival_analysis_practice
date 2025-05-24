@@ -1,0 +1,350 @@
+---
+title: "Project_codes"
+author: "Shri Vishalini Rajaram"
+date: "2025-05-02"
+output:
+  pdf_document: default
+  eval: true
+  echo: false
+  include: false
+---
+
+```{r setup_codes, include=FALSE}
+# Global chunk options
+knitr::opts_chunk$set(
+  echo = FALSE,       
+  message = FALSE,    
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 6,
+  fig.height = 4,
+  fig.cap = "auto",
+  dpi = 600
+)
+
+# Load required libraries
+library(tidyverse)      # Data wrangling and plotting
+library(survival)       # Core survival analysis
+library(survminer)      # Kaplan-Meier plots and diagnostics
+library(splines)        # Natural splines for functional form checks
+library(JM)             # For data (aids.id and aids)
+library(kableExtra)     # Nicely formatted tables
+library(gt)             # Publication-quality tables (optional)
+library(broom)          # Tidy model outputs
+library(patchwork)
+set.seed(1995)
+```
+
+
+```{r helpers, echo=TRUE}
+# -------------------------
+# Helper Functions
+# -------------------------
+
+### Smooth ES Curve for Martingale residuals
+smoothSEcurve <- function(yy, xx) {
+  xx.list <- min(xx) + ((0:100)/100)*(max(xx) - min(xx))
+  yy.xx <- predict(loess(yy ~ xx), se=T, newdata=data.frame(xx=xx.list))
+  quantile.t = qt(0.975, yy.xx$df)
+  lines(yy.xx$fit ~ xx.list, lwd=2)
+  lines(yy.xx$fit - quantile.t*yy.xx$se.fit ~ xx.list, lty=2)
+  lines(yy.xx$fit + quantile.t*yy.xx$se.fit ~ xx.list, lty=2)
+}
+
+# ---- Extractor Functions ----
+extract_metrics_cox <- function(model) {
+  ll <- logLik(model)
+  data.frame(
+    Log_Likelihood = as.numeric(ll),
+    Degrees_of_Freedom = attr(ll, "df"),
+    AIC = AIC(model),
+    Concordance = summary(model)$concordance[1]
+  )
+}
+
+extract_metrics_aft <- function(model) {
+  ll <- logLik(model)
+  data.frame(
+    Log_Likelihood = as.numeric(ll),
+    Degrees_of_Freedom = attr(ll, "df"),
+    AIC = AIC(model),
+    Concordance = NA
+  )
+}
+
+# Compute vertical lines for mean and median survival
+get_stats <- function(fit, label) {
+  tbl <- summary(fit)$table
+  if (is.matrix(tbl)) {
+    # Multi-group (e.g., ~ drug)
+    data.frame(
+      group = rownames(tbl),
+      rmean = tbl[, "rmean"],
+      median = tbl[, "median"]
+    )
+  } else {
+    # Single group (e.g., ~1)
+    data.frame(
+      group = label,
+      rmean = tbl["rmean"],
+      median = tbl["median"]
+    )
+  }
+}
+```
+
+
+
+```{r data_preprocess, echo=TRUE}
+# -------------------------
+# Data Preprocessing
+# -------------------------
+attach(aids.id)
+attach(aids)
+myseed = set.seed(1995)
+myid = sample(aids.id$patient, 400)
+myaids.id = subset(aids.id, patient %in% myid)
+myaids = subset(aids, patient %in% myid)
+glimpse(myaids.id)
+glimpse(myaids)
+```
+
+
+
+
+```{r km_model}
+# ------------------------
+# Kaplan-Meier Model
+# ------------------------
+
+# No assumption null model
+km_fit <- survfit(Surv(Time, death) ~ 1, data = myaids.id, conf.type = "log-log")
+summary(km_fit)$table
+
+# Model stratified with treatment group
+km_fit_drug <- survfit(Surv(Time, death) ~ drug, data = myaids.id, conf.type = "log-log")
+summary(km_fit_drug)$table
+```
+
+```{r ti_cox_model, warning=FALSE, message=FALSE}
+# ----------------------------
+# Time independent Cox model
+# ----------------------------
+
+## Model Selection
+
+### Null Model
+cox_ti_null <- coxph(Surv(Time, death) ~ 1, data = myaids.id)
+summary(cox_ti_null)
+paste0("AIC of Null Model: ", AIC(cox_ti_null))
+
+
+### Full model with Univariates
+cox_full_ti_uni <- coxph(Surv(Time, death) ~ CD4 + drug + gender + prevOI + AZT, data = myaids.id)
+summary(cox_full_ti_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(cox_full_ti_uni))
+
+
+### Functional form of CD4 using Martingale model
+
+#### Raw CD4 martingale
+mart_full_ti <- resid(cox_full_ti_uni, type = "martingale")
+
+#### Log-transformed CD4
+myaids_log <- myaids.id %>%
+  mutate(CD4_log = log(CD4 + 1))  # add small constant to avoid log(0)
+cox_ti_log <- coxph(Surv(Time, death) ~ CD4_log + drug + gender + prevOI + AZT, data = myaids_log)
+summary(cox_ti_log)
+
+#### Log CD4 martingale
+mart_ti_log <- resid(cox_ti_log, type = "martingale")
+
+aic_ti_linear <- round(AIC(cox_full_ti_uni),2)
+aic_ti_log <- round(AIC(cox_ti_log),2)
+
+### Full model with Univariates - Step
+cox_full_ti_uni_step <- step(cox_full_ti_uni,
+                          scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), trace = 0)
+summary(cox_full_ti_uni_step)
+paste0("AIC of Main Effects (Univariate) Model with Stepwise Selection: ", AIC(cox_full_ti_uni_step))
+
+### Full model with Interactions
+cox_full_ti_int <- coxph(Surv(Time, death) ~ (CD4 + drug + gender + prevOI + AZT)^5, data = myaids.id)
+summary(cox_full_ti_int)
+paste0("AIC of Interactions Model: ", AIC(cox_full_ti_int))
+
+### Full model with Interactions - Step
+cox_full_ti_int_step <- step(cox_full_ti_int,
+                          scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), trace = 0)
+summary(cox_full_ti_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(cox_full_ti_int_step))
+
+### Final Time Independent Cox Model
+cox_ti_final <- coxph(formula = Surv(Time, death) ~ CD4 + drug + gender + prevOI + 
+      AZT + CD4:drug + CD4:gender + CD4:prevOI + CD4:AZT + drug:gender + 
+      drug:prevOI + drug:AZT + gender:prevOI + gender:AZT + CD4:drug:gender + 
+      CD4:drug:AZT + CD4:gender:prevOI + CD4:gender:AZT + drug:gender:prevOI + 
+      drug:gender:AZT + CD4:drug:gender:AZT, data = myaids.id)
+summary(cox_ti_final)
+paste0("AIC Final Selected Model: ", AIC(cox_ti_final))
+```
+
+
+
+```{r}
+# ----------------------------
+# Time dependent Cox model
+# ----------------------------
+# Create survival object with start–stop format
+surv_td <- Surv(time = myaids$start, time2 = myaids$stop, event = myaids$event)
+
+### Null Model
+cox_td_null <- coxph(surv_td ~ 1, data = myaids)
+summary(cox_td_null)
+paste0("AIC of Null Model: ", AIC(cox_td_null))
+
+### Full model with Univariates
+cox_full_td_uni <- coxph(surv_td ~ CD4 + drug + gender + prevOI + AZT, data = myaids)
+summary(cox_full_td_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(cox_full_td_uni))
+
+
+### Functional form of CD4 using Martingale model
+
+#### Raw CD4 martingale
+mart_td <- resid(cox_full_td_uni, type = "martingale")
+
+#### Log CD4 martingale
+myaids_log <- myaids %>% mutate(CD4_log = log(CD4 + 1))
+cox_td_log <- coxph(surv_td ~ CD4_log + drug + gender + prevOI + AZT, data = myaids_log)
+mart_td_log <- resid(cox_td_log, type = "martingale")
+
+
+#### AIC Comparison
+aic_td_linear <- round(AIC(cox_full_td_uni),2)
+aic_td_log <- round(AIC(cox_td_log),2)
+
+### Full model with Univariates - Step
+cox_full_td_uni_step <- step(cox_full_td_uni,
+                             scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), trace = 0)
+summary(cox_full_td_uni_step)
+paste0("AIC of Main Effects (Univariate) Model with Stepwise Selection: ", AIC(cox_full_td_uni_step))
+
+### Full model with Interactions
+cox_full_td_int <- coxph(surv_td ~ (CD4 + drug + gender + prevOI + AZT)^5, data = myaids)
+summary(cox_full_td_int)
+paste0("AIC of Interactions Model: ", AIC(cox_full_td_int))
+
+### Stepwise on Interaction Model
+cox_full_td_int_step <- step(cox_full_td_int,
+                             scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), trace = 0)
+summary(cox_full_td_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(cox_full_td_int_step))
+
+### Final Time dependent Cox Model
+cox_td_final <- coxph(surv_td ~ CD4 + drug + gender + prevOI + AZT + 
+    CD4:gender + CD4:prevOI + CD4:AZT + drug:prevOI + gender:AZT + 
+    CD4:gender:AZT, data = myaids)
+summary(cox_td_final)
+paste0("AIC Final Selected Model: ", AIC(cox_td_final))
+```
+
+
+```{r}
+# ----------------------------------------
+# Accelerated Failure Time (AFT) model
+# ----------------------------------------
+
+# ----------------------------------------
+# Weibull Distribution
+# ----------------------------------------
+
+
+### Null model
+weibull_ti_null <- survreg(Surv(Time, death) ~ 1, data = myaids.id, dist = "weibull")
+summary(weibull_ti_null)
+paste0("AIC of Null Model: ", AIC(weibull_ti_null))
+
+
+### Full model with Univariates
+weibull_full_ti_uni <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + AZT, data = myaids.id, dist = "weibull")
+summary(weibull_full_ti_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(weibull_full_ti_uni))
+
+
+### Full model with Univariates - Step
+weibull_full_ti_uni_step <- step(weibull_full_ti_uni,
+                          scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), trace = 0)
+summary(weibull_full_ti_uni_step)
+paste0("AIC of Main Effects (Univariate) Model with Stepwise Selection: ", AIC(cox_full_td_uni_step))
+
+### Full model with Interactions
+weibull_full_ti_int <- survreg(Surv(Time, death) ~ (CD4 + drug + gender + prevOI + AZT)^5, data = myaids.id, dist = "weibull")
+summary(weibull_full_ti_int)
+paste0("AIC of Interactions Model: ", AIC(weibull_full_ti_int))
+
+### Full model with Interactions - Step
+weibull_full_ti_int_step <- step(weibull_full_ti_int,
+                          scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), trace = 0)
+summary(weibull_full_ti_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(weibull_full_ti_int_step))
+
+
+### Final Time Independent Weibull Model
+weibull_ti_final <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + 
+    AZT + CD4:drug + CD4:gender + CD4:prevOI + CD4:AZT + drug:gender + 
+    drug:prevOI + drug:AZT + gender:prevOI + gender:AZT + CD4:drug:gender + 
+    CD4:drug:AZT + CD4:gender:prevOI + CD4:gender:AZT + drug:gender:prevOI + 
+    drug:gender:AZT + CD4:drug:gender:AZT, data = myaids.id, 
+    dist = "weibull")
+summary(weibull_ti_final)
+paste0("AIC Final Selected Model: ", AIC(weibull_ti_final))
+```
+
+
+```{r}
+# ----------------------------------------
+# Log-Normal distribution
+# ----------------------------------------
+
+# Null model
+lognorm_ti_null <- survreg(Surv(Time, death) ~ 1, data = myaids.id, dist = "lognormal")
+summary(lognorm_ti_null)
+paste0("AIC of Null Model: ", AIC(lognorm_ti_null))
+
+# Full model with univariates
+lognorm_full_ti_uni <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + AZT, 
+                               data = myaids.id, dist = "lognormal")
+summary(lognorm_full_ti_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(lognorm_full_ti_uni))
+
+# Stepwise selection from full univariate model
+lognorm_full_ti_uni_step <- step(lognorm_full_ti_uni,
+                                 scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), trace = 0)
+summary(lognorm_full_ti_uni_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(lognorm_full_ti_uni_step))
+
+
+# Full interaction model
+lognorm_full_ti_int <- survreg(Surv(Time, death) ~ (CD4 + drug + gender + prevOI + AZT)^5, 
+                               data = myaids.id, dist = "lognormal")
+summary(lognorm_full_ti_int)
+paste0("AIC of Interactions Model: ", AIC(lognorm_full_ti_int))
+
+# Stepwise interaction model
+lognorm_full_ti_int_step <- step(lognorm_full_ti_int,
+                                 scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), trace = 0)
+summary(lognorm_full_ti_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(lognorm_full_ti_int_step))
+
+# Final log-normal model
+lognorm_ti_final <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + 
+    AZT + CD4:gender + CD4:prevOI + CD4:AZT + drug:prevOI + gender:prevOI + 
+    gender:AZT + CD4:gender:prevOI + CD4:gender:AZT, data = myaids.id, 
+    dist = "lognormal")
+summary(lognorm_ti_final)
+paste0("AIC Final Selected Model: ", AIC(lognorm_ti_final))
+```
+
+
+

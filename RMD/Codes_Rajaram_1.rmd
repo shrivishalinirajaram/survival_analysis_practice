@@ -1,0 +1,764 @@
+---
+title: "Appendix Project Codes"
+author: "Shri Vishalini Rajaram"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    keep_tex: true
+documentclass: report
+fontsize: 11pt
+geometry: margin=0.5in
+linestretch: 1
+header-includes:
+  - \usepackage{listings}
+  - \lstset{breaklines=true, basicstyle=\ttfamily\footnotesize, breakatwhitespace=true}
+---
+
+```{r setup_codes, include=FALSE}
+# Global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,       
+  message = FALSE,    
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 6,
+  fig.height = 4,
+  fig.cap = "auto",
+  dpi = 600
+)
+
+# Load required libraries
+library(tidyverse)      # Data wrangling and plotting
+library(survival)       # Core survival analysis
+library(survminer)      # Kaplan-Meier plots and diagnostics
+library(splines)        # Natural splines for functional form checks
+library(JM)             # For data (aids.id and aids)
+library(kableExtra)     # Nicely formatted tables
+library(gt)             # Publication-quality tables (optional)
+library(broom)          # Tidy model outputs
+library(patchwork)
+set.seed(1995)
+```
+
+
+```{r helpers, echo=TRUE}
+# -------------------------
+# Helper Functions
+# -------------------------
+
+### Smooth ES Curve for Martingale residuals
+smoothSEcurve <- function(yy, xx) {
+  xx.list <- min(xx) + ((0:100)/100)*(max(xx) - min(xx))
+  yy.xx <- predict(loess(yy ~ xx), se=T, newdata=data.frame(xx=xx.list))
+  quantile.t = qt(0.975, yy.xx$df)
+  lines(yy.xx$fit ~ xx.list, lwd=2)
+  lines(yy.xx$fit - quantile.t*yy.xx$se.fit ~ xx.list, lty=2)
+  lines(yy.xx$fit + quantile.t*yy.xx$se.fit ~ xx.list, lty=2)
+}
+
+# ---- Extractor Functions ----
+extract_metrics_cox <- function(model) {
+  ll <- logLik(model)
+  data.frame(
+    Log_Likelihood = as.numeric(ll),
+    Degrees_of_Freedom = attr(ll, "df"),
+    AIC = AIC(model),
+    Concordance = summary(model)$concordance[1]
+  )
+}
+
+extract_metrics_aft <- function(model) {
+  ll <- logLik(model)
+  data.frame(
+    Log_Likelihood = as.numeric(ll),
+    Degrees_of_Freedom = attr(ll, "df"),
+    AIC = AIC(model),
+    Concordance = NA
+  )
+}
+
+# Compute vertical lines for mean and median survival
+get_stats <- function(fit, label) {
+  tbl <- summary(fit)$table
+  if (is.matrix(tbl)) {
+    # Multi-group (e.g., ~ drug)
+    data.frame(
+      group = rownames(tbl),
+      rmean = tbl[, "rmean"],
+      median = tbl[, "median"]
+    )
+  } else {
+    # Single group (e.g., ~1)
+    data.frame(
+      group = label,
+      rmean = tbl["rmean"],
+      median = tbl["median"]
+    )
+  }
+}
+```
+
+
+
+```{r data_preprocess, echo=TRUE}
+# -------------------------
+# Data Preprocessing
+# -------------------------
+attach(aids.id)
+attach(aids)
+myseed = set.seed(1995)
+myid = sample(aids.id$patient, 400)
+myaids.id = subset(aids.id, patient %in% myid)
+myaids = subset(aids, patient %in% myid)
+glimpse(myaids.id)
+glimpse(myaids)
+```
+
+
+
+
+```{r km_model}
+# ------------------------
+# Kaplan-Meier Model
+# ------------------------
+
+# No assumption null model
+km_fit <- survfit(Surv(Time, death) ~ 1, data = myaids.id, conf.type = "log-log")
+summary(km_fit)$table
+
+# Model stratified with treatment group
+km_fit_drug <- survfit(Surv(Time, death) ~ drug, data = myaids.id, conf.type = "log-log")
+summary(km_fit_drug)$table
+```
+
+
+```{r table1, echo=FALSE, message=FALSE, warning=FALSE}
+# ---- Continuous Variables Summary ----
+cont_data <- myaids.id %>%
+  group_by(drug) %>%
+  summarise(
+    `Time (mean ± SD)` = paste0(round(mean(Time), 1), " ± ", round(sd(Time), 1)),
+    `CD4 (mean ± SD)` = paste0(round(mean(CD4), 1), " ± ", round(sd(CD4), 1)),
+    `Deaths (%)` = paste0(sum(death), " (", round(mean(death) * 100, 1), "%)"),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(-drug, names_to = "Variable", values_to = "Value") %>%
+  pivot_wider(names_from = drug, values_from = Value) %>%
+  mutate(Subcategory = "") %>%
+  relocate(Variable, Subcategory)
+
+# ---- Categorical Variables Summary ----
+cat_vars <- list(
+  "Gender" = "gender",
+  "Previous Infection" = "prevOI",
+  "AZT" = "AZT"
+)
+
+cat_data <- map_dfr(names(cat_vars), function(var_label) {
+  var_name <- cat_vars[[var_label]]
+  levels <- levels(myaids.id[[var_name]])
+  
+  map_dfr(levels, function(lvl) {
+    tab <- myaids.id %>%
+      filter(.data[[var_name]] == lvl) %>%
+      count(drug) %>%
+      pivot_wider(names_from = drug, values_from = n, values_fill = 0)
+    
+    tibble(
+      Variable = var_label,
+      Subcategory = lvl,
+      `ddC` = tab$ddC,
+      `ddI` = tab$ddI
+    )
+  })
+})
+
+cat_data <- cat_data %>%
+  mutate(across(where(is.numeric), as.character))
+
+# ---- Combine and Clean ----
+table1 <- bind_rows(cont_data, cat_data) %>%
+  dplyr::select(Variable, Subcategory, ddC = ddC, ddI = ddI)
+
+table1 <- table1 %>%
+  mutate(
+    Variable = ifelse(duplicated(Variable), "", Variable)
+  )
+
+# ---- Create gt Table ----
+table1 %>%
+  gt() %>%
+  tab_header(
+    title = md("**Table 1. Baseline Characteristics by Treatment Group (ddC vs ddI)**")
+  ) %>%
+  cols_label(
+    Variable = "Variable",
+    Subcategory = "Subcategory",
+    ddC = "ddC",
+    ddI = "ddI"
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  ) %>%
+  tab_options(
+    table.font.size = "x-small",
+    data_row.padding = px(0),
+    table.width = pct(100)
+  )
+```
+
+
+
+```{r KMcurve, fig.cap = "Kaplan–Meier survival curves with 95% confidence intervals for overall and drug-specific survival (ddC vs ddI). Dashed lines: mean survival; solid lines: median survival. Overall is shown in black. NA values were found for Median and Upper CI", fig.align = "center", fig.width = 4.8, fig.height = 2.5, dpi = 600}
+# Extract survival data
+df_all <- surv_summary(km_fit, data = myaids.id) %>%
+  mutate(group = "Overall")
+
+df_drug <- surv_summary(km_fit_drug, data = myaids.id) %>%
+  mutate(group = strata) %>%
+  mutate(group = gsub("drug=", "", group))
+
+# Combine
+km_data <- bind_rows(df_all, df_drug)
+
+vlines <- bind_rows(
+  get_stats(km_fit, "Overall"),
+  get_stats(km_fit_drug, "ddC"),
+  get_stats(km_fit_drug, "ddI")
+) %>% pivot_longer(cols = c(rmean, median), names_to = "type", values_to = "time") %>%
+  mutate(linetype = ifelse(type == "median", "solid", "dashed"))
+
+# Color map
+color_map <- c("ddC" = "#E69F00", "ddI" = "#008080", "Overall" = "black")
+
+# Plot
+ggplot(km_data, aes(x = time, y = surv, color = group)) +
+  geom_step(linewidth = 0.6) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = group), 
+              alpha = 0.2, color = NA) +
+  geom_point(data = filter(km_data, n.censor > 0), 
+             aes(x = time, y = surv), shape = 3, size = 0.7) +
+  geom_vline(data = vlines, aes(xintercept = time, color = group, 
+                                linetype = linetype), linewidth = 0.6) +
+  scale_color_manual(values = color_map) +
+  scale_fill_manual(values = color_map) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0.01, 0)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  scale_linetype_manual(values = c("solid" = "solid", "dashed" = "dashed"),
+                        labels = c("solid" = "Median", "dashed" = "Mean")) +
+  labs(x = "Time (months)", y = "Survival probability", color = "Group", 
+       linetype = "Line Type") +
+  theme_classic(base_size = 7)
+```
+
+
+```{r ti_cox_model, warning=FALSE, message=FALSE}
+# ----------------------------
+# Time independent Cox model
+# ----------------------------
+
+## Model Selection
+
+### Null Model
+cox_ti_null <- coxph(Surv(Time, death) ~ 1, data = myaids.id)
+summary(cox_ti_null)
+paste0("AIC of Null Model: ", AIC(cox_ti_null))
+
+
+### Full model with Univariates
+cox_full_ti_uni <- coxph(Surv(Time, death) ~ CD4 + drug + gender + prevOI + AZT, 
+                         data = myaids.id)
+summary(cox_full_ti_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(cox_full_ti_uni))
+
+
+### Functional form of CD4 using Martingale model
+
+#### Raw CD4 martingale
+mart_full_ti <- resid(cox_full_ti_uni, type = "martingale")
+
+#### Log-transformed CD4
+myaids_log <- myaids.id %>%
+  mutate(CD4_log = log(CD4 + 1))  # add small constant to avoid log(0)
+cox_ti_log <- coxph(Surv(Time, death) ~ CD4_log + drug + gender + prevOI + AZT, 
+                    data = myaids_log)
+summary(cox_ti_log)
+
+#### Log CD4 martingale
+mart_ti_log <- resid(cox_ti_log, type = "martingale")
+
+aic_ti_linear <- round(AIC(cox_full_ti_uni),2)
+aic_ti_log <- round(AIC(cox_ti_log),2)
+
+### Full model with Univariates - Step
+cox_full_ti_uni_step <- step(cox_full_ti_uni,
+                          scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), 
+                          trace = 0)
+summary(cox_full_ti_uni_step)
+paste0("AIC of Main Effects (Univariate) Model with Stepwise Selection: ", 
+       AIC(cox_full_ti_uni_step))
+
+### Full model with Interactions
+cox_full_ti_int <- coxph(Surv(Time, death) ~ (CD4 + drug + gender + prevOI + AZT)^5, 
+                         data = myaids.id)
+summary(cox_full_ti_int)
+paste0("AIC of Interactions Model: ", AIC(cox_full_ti_int))
+
+### Full model with Interactions - Step
+cox_full_ti_int_step <- step(cox_full_ti_int,
+                          scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), 
+                          trace = 0)
+summary(cox_full_ti_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(cox_full_ti_int_step))
+
+### Final Time Independent Cox Model
+cox_ti_final <- coxph(formula = Surv(Time, death) ~ CD4 + drug + gender + prevOI + 
+      AZT + CD4:drug + CD4:gender + CD4:prevOI + CD4:AZT + drug:gender + 
+      drug:prevOI + drug:AZT + gender:prevOI + gender:AZT + CD4:drug:gender + 
+      CD4:drug:AZT + CD4:gender:prevOI + CD4:gender:AZT + drug:gender:prevOI + 
+      drug:gender:AZT + CD4:drug:gender:AZT, data = myaids.id)
+summary(cox_ti_final)
+paste0("AIC Final Selected Model: ", AIC(cox_ti_final))
+```
+
+
+
+```{r}
+# ----------------------------
+# Time dependent Cox model
+# ----------------------------
+# Create survival object with start–stop format
+surv_td <- Surv(time = myaids$start, time2 = myaids$stop, event = myaids$event)
+
+### Null Model
+cox_td_null <- coxph(surv_td ~ 1, data = myaids)
+summary(cox_td_null)
+paste0("AIC of Null Model: ", AIC(cox_td_null))
+
+### Full model with Univariates
+cox_full_td_uni <- coxph(surv_td ~ CD4 + drug + gender + prevOI + AZT, data = myaids)
+summary(cox_full_td_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(cox_full_td_uni))
+
+
+### Functional form of CD4 using Martingale model
+
+#### Raw CD4 martingale
+mart_td <- resid(cox_full_td_uni, type = "martingale")
+
+#### Log CD4 martingale
+myaids_log <- myaids %>% mutate(CD4_log = log(CD4 + 1))
+cox_td_log <- coxph(surv_td ~ CD4_log + drug + gender + prevOI + AZT, data = myaids_log)
+mart_td_log <- resid(cox_td_log, type = "martingale")
+
+
+#### AIC Comparison
+aic_td_linear <- round(AIC(cox_full_td_uni),2)
+aic_td_log <- round(AIC(cox_td_log),2)
+
+### Full model with Univariates - Step
+cox_full_td_uni_step <- step(cox_full_td_uni,
+                             scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), 
+                             trace = 0)
+summary(cox_full_td_uni_step)
+paste0("AIC of Main Effects (Univariate) Model with Stepwise Selection: ", 
+       AIC(cox_full_td_uni_step))
+
+### Full model with Interactions
+cox_full_td_int <- coxph(surv_td ~ (CD4 + drug + gender + prevOI + AZT)^5, data = myaids)
+summary(cox_full_td_int)
+paste0("AIC of Interactions Model: ", AIC(cox_full_td_int))
+
+### Stepwise on Interaction Model
+cox_full_td_int_step <- step(cox_full_td_int,
+                             scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), 
+                             trace = 0)
+summary(cox_full_td_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(cox_full_td_int_step))
+
+### Final Time dependent Cox Model
+cox_td_final <- coxph(surv_td ~ CD4 + drug + gender + prevOI + AZT + 
+    CD4:gender + CD4:prevOI + CD4:AZT + drug:prevOI + gender:AZT + 
+    CD4:gender:AZT, data = myaids)
+summary(cox_td_final)
+paste0("AIC Final Selected Model: ", AIC(cox_td_final))
+```
+
+
+```{r martingale, fig.cap="Martingale residuals for CD4 and log(CD4) in TI/TD Cox models. Loess fits with 95% CI shown. AIC values are annotated in red.", fig.align="center", fig.width = 6.5, fig.height = 4.2, dpi=600}
+
+layout(matrix(1:4, nrow = 2, byrow = TRUE))
+par(mar = c(3.5, 3.5, 2.2, 1), oma = c(2, 2, 1, 1), mgp = c(2, 0.6, 0), tck = -0.02)
+
+# Plot A: TI - CD4
+plot(myaids.id$CD4, mart_full_ti, pch = 20, cex = 0.3, xlab = "", ylab = "", 
+     main = "", ylim = c(-1.5, 0.75), xlim = c(0, 20))
+smoothSEcurve(mart_full_ti, myaids.id$CD4)
+mtext("A. TI Cox: CD4", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 15, y = -1.4, labels = paste("AIC =", round(aic_ti_linear, 2)), 
+     col = "red", cex = 0.85)
+
+# Plot B: TI - log(CD4)
+plot(log(myaids.id$CD4 + 1), mart_ti_log, pch = 20, cex = 0.3, xlab = "", ylab = "", 
+     main = "", ylim = c(-2, 1), xlim = c(0, 3))
+smoothSEcurve(mart_ti_log, log(myaids.id$CD4 + 1))
+mtext("B. TI Cox: log(CD4)", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 2.3, y = -1.9, labels = paste("AIC =", aic_ti_log), col = "red", cex = 0.85)
+
+# Plot C: TD - CD4
+plot(myaids$CD4, mart_td, pch = 20, cex = 0.3, xlab = "", ylab = "", 
+     main = "", ylim = c(-1, 1), xlim = c(0, 20))
+smoothSEcurve(mart_td, myaids$CD4)
+mtext("C. TD Cox: CD4", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 15, y = -0.9, labels = paste("AIC =", round(aic_td_linear, 2)), 
+     col = "red", cex = 0.85)
+
+# Plot D: TD - log(CD4)
+plot(log(myaids$CD4 + 1), mart_td_log, pch = 20, cex = 0.3, xlab = "", ylab = "", 
+     main = "", ylim = c(-1.5, 1), xlim = c(0, 3))
+smoothSEcurve(mart_td_log, log(myaids$CD4 + 1))
+mtext("D. TD Cox: log(CD4)", side = 3, line = 0.4, adj = 0, font = 2, cex = 0.75)
+text(x = 2.3, y = -1.4, labels = paste("AIC =", aic_td_log), 
+     col = "red", cex = 0.85)
+
+# Shared axis labels
+mtext("Martingale Residuals", side = 2, outer = TRUE, line = 0.3, cex = 0.8)
+mtext("CD4 or log(CD4 + 1)", side = 1, outer = TRUE, line = 0.3, cex = 0.8)
+```
+
+```{r}
+# ----------------------------------------
+# Accelerated Failure Time (AFT) model
+# ----------------------------------------
+
+# ----------------------------------------
+# Weibull Distribution
+# ----------------------------------------
+
+
+### Null model
+weibull_ti_null <- survreg(Surv(Time, death) ~ 1, data = myaids.id, dist = "weibull")
+summary(weibull_ti_null)
+paste0("AIC of Null Model: ", AIC(weibull_ti_null))
+
+
+### Full model with Univariates
+weibull_full_ti_uni <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + AZT, 
+                               data = myaids.id, dist = "weibull")
+summary(weibull_full_ti_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(weibull_full_ti_uni))
+
+
+### Full model with Univariates - Step
+weibull_full_ti_uni_step <- step(weibull_full_ti_uni,
+                          scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), 
+                          trace = 0)
+summary(weibull_full_ti_uni_step)
+paste0("AIC of Main Effects (Univariate) Model with Stepwise Selection: ", 
+       AIC(cox_full_td_uni_step))
+
+### Full model with Interactions
+weibull_full_ti_int <- survreg(Surv(Time, death) ~ (CD4 + drug + gender + prevOI + AZT)^5, 
+                               data = myaids.id, dist = "weibull")
+summary(weibull_full_ti_int)
+paste0("AIC of Interactions Model: ", AIC(weibull_full_ti_int))
+
+### Full model with Interactions - Step
+weibull_full_ti_int_step <- step(weibull_full_ti_int,
+                          scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), 
+                          trace = 0)
+summary(weibull_full_ti_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", 
+       AIC(weibull_full_ti_int_step))
+
+
+### Final Time Independent Weibull Model
+weibull_ti_final <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + 
+    AZT + CD4:drug + CD4:gender + CD4:prevOI + CD4:AZT + drug:gender + 
+    drug:prevOI + drug:AZT + gender:prevOI + gender:AZT + CD4:drug:gender + 
+    CD4:drug:AZT + CD4:gender:prevOI + CD4:gender:AZT + drug:gender:prevOI + 
+    drug:gender:AZT + CD4:drug:gender:AZT, data = myaids.id, 
+    dist = "weibull")
+summary(weibull_ti_final)
+paste0("AIC Final Selected Model: ", AIC(weibull_ti_final))
+```
+
+
+```{r}
+# ----------------------------------------
+# Log-Normal distribution
+# ----------------------------------------
+
+# Null model
+lognorm_ti_null <- survreg(Surv(Time, death) ~ 1, data = myaids.id, dist = "lognormal")
+summary(lognorm_ti_null)
+paste0("AIC of Null Model: ", AIC(lognorm_ti_null))
+
+# Full model with univariates
+lognorm_full_ti_uni <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + AZT, 
+                               data = myaids.id, dist = "lognormal")
+summary(lognorm_full_ti_uni)
+paste0("AIC of Main Effects (Univariate) Model: ", AIC(lognorm_full_ti_uni))
+
+# Stepwise selection from full univariate model
+lognorm_full_ti_uni_step <- step(lognorm_full_ti_uni,
+                                 scope = list(upper = ~ CD4 + drug + gender + prevOI + AZT), 
+                                 trace = 0)
+summary(lognorm_full_ti_uni_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(lognorm_full_ti_uni_step))
+
+
+# Full interaction model
+lognorm_full_ti_int <- survreg(Surv(Time, death) ~ (CD4 + drug + gender + prevOI + AZT)^5, 
+                               data = myaids.id, dist = "lognormal")
+summary(lognorm_full_ti_int)
+paste0("AIC of Interactions Model: ", AIC(lognorm_full_ti_int))
+
+# Stepwise interaction model
+lognorm_full_ti_int_step <- step(lognorm_full_ti_int,
+                                 scope = list(upper = ~ (CD4 + drug + gender + prevOI + AZT)^5), 
+                                 trace = 0)
+summary(lognorm_full_ti_int_step)
+paste0("AIC of Interactions Model with Stepwise Selection: ", AIC(lognorm_full_ti_int_step))
+
+# Final log-normal model
+lognorm_ti_final <- survreg(Surv(Time, death) ~ CD4 + drug + gender + prevOI + 
+    AZT + CD4:gender + CD4:prevOI + CD4:AZT + drug:prevOI + gender:prevOI + 
+    gender:AZT + CD4:gender:prevOI + CD4:gender:AZT, data = myaids.id, 
+    dist = "lognormal")
+summary(lognorm_ti_final)
+paste0("AIC Final Selected Model: ", AIC(lognorm_ti_final))
+```
+
+
+```{r table1a}
+
+# ---- Build Model Comparison Table ----
+model_comp_all <- bind_rows(
+  # Cox Time-Independent
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", 
+        Model = "Null", extract_metrics_cox(cox_ti_null)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", 
+        Model = "Main Effects", extract_metrics_cox(cox_full_ti_uni)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", 
+        Model = "Stepwise", extract_metrics_cox(cox_full_ti_uni_step)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", 
+        Model = "Interaction Full", extract_metrics_cox(cox_full_ti_int)),
+  cbind(Section = "Cox Proportional Hazards (Time-Independent)", 
+        Model = "Interaction Stepwise", extract_metrics_cox(cox_full_ti_int_step)),
+
+  # Cox Time-Dependent
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", 
+        Model = "Null", extract_metrics_cox(cox_td_null)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", 
+        Model = "Main Effects", extract_metrics_cox(cox_full_td_uni)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", 
+        Model = "Stepwise", extract_metrics_cox(cox_full_td_uni_step)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", 
+        Model = "Interaction Full", extract_metrics_cox(cox_full_td_int)),
+  cbind(Section = "Cox Proportional Hazards (Time-Dependent)", 
+        Model = "Interaction Stepwise", extract_metrics_cox(cox_full_td_int_step)),
+
+  # AFT Weibull
+  cbind(Section = "AFT: Weibull", Model = "Null", 
+        extract_metrics_aft(weibull_ti_null)),
+  cbind(Section = "AFT: Weibull", Model = "Main Effects", 
+        extract_metrics_aft(weibull_full_ti_uni)),
+  cbind(Section = "AFT: Weibull", Model = "Stepwise", 
+        extract_metrics_aft(weibull_full_ti_uni_step)),
+  cbind(Section = "AFT: Weibull", Model = "Interaction Full", 
+        extract_metrics_aft(weibull_full_ti_int)),
+  cbind(Section = "AFT: Weibull", Model = "Interaction Stepwise", 
+        extract_metrics_aft(weibull_full_ti_int_step)),
+
+  # AFT Log-Normal
+  cbind(Section = "AFT: Log-Normal", Model = "Null", 
+        extract_metrics_aft(lognorm_ti_null)),
+  cbind(Section = "AFT: Log-Normal", Model = "Main Effects", 
+        extract_metrics_aft(lognorm_full_ti_uni)),
+  cbind(Section = "AFT: Log-Normal", Model = "Stepwise", 
+        extract_metrics_aft(lognorm_full_ti_uni_step)),
+  cbind(Section = "AFT: Log-Normal", Model = "Interaction Full", 
+        extract_metrics_aft(lognorm_full_ti_int)),
+  cbind(Section = "AFT: Log-Normal", Model = "Interaction Stepwise", 
+        extract_metrics_aft(lognorm_full_ti_int_step))
+  ) %>%
+  mutate(row_id = row_number())  # Unique ID for later reference
+
+# ---- Get Row IDs with Lowest AIC in Each Section ----
+highlight_ids <- model_comp_all %>%
+  group_by(Section) %>%
+  filter(AIC == min(AIC, na.rm = TRUE)) %>%
+  pull(row_id)
+```
+
+
+```{r}
+
+# ---- Build GT Table ----
+model_comp_all %>%
+  gt(groupname_col = "Section") %>%
+  tab_header(title = md("**Table A1. Model Comparison: Cox (TI/TD) and Parametric AFT Models**")) %>%
+  fmt_number(columns = c(Log_Likelihood, AIC, Concordance), decimals = 3) %>%
+  cols_label(
+    Model = "Model",
+    Log_Likelihood = "Log-Likelihood",
+    Degrees_of_Freedom = "DF",
+    AIC = "AIC",
+    Concordance = "Concordance (C-index)"
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#d0f0c0"), cell_text(weight = "bold")),
+    locations = cells_body(
+      rows = row_id %in% highlight_ids,
+      columns = AIC
+    )
+  ) %>%
+  tab_options(
+    table.font.size = "x-small",
+    data_row.padding = px(0),
+    table.width = pct(100)
+  ) %>%
+  cols_hide(columns = row_id) %>% as_latex()
+```
+
+
+
+
+```{r}
+# -------------------------------------------------
+# Time independent Cox model - Model Diagnostics
+# -------------------------------------------------
+
+## Influential observations
+# DFBETAs (for each covariate)
+dfb_ti <- residuals(cox_ti_final, type = "dfbeta")
+colnames(dfb_ti) <- names(coef(cox_ti_final))
+dfb_ti_df <- as.data.frame(dfb_ti)
+dfb_ti_df$Observation <- 1:nrow(dfb_ti_df)
+dfb_ti_long <- pivot_longer(dfb_ti_df, -Observation, names_to = "Covariate", 
+                            values_to = "DFBETA")
+dfb_ti_extreme <- dfb_ti_long %>%
+  filter(abs(DFBETA) > 0.5)
+
+dfb_ti_extreme_summary <- dfb_ti_extreme %>%
+  group_by(Covariate) %>%
+  summarise(
+    n_extreme = n(),
+    Obs_IDs = paste(unique(Observation), collapse = ", "),
+    .groups = "drop"
+  )
+
+dfb_ti_extreme_summary %>%
+  gt() %>%
+  tab_header(title = md("**Table A2: Cox time-independent model - 
+                        Covariates with DFBETA > 0.5**")) %>%
+  cols_label(
+    Covariate = "Covariate",
+    n_extreme = "# Influential Obs",
+    Obs_IDs = "Observation IDs"
+  ) %>%
+  tab_options(table.font.size = "small")
+
+### Proportional hazards assumption validation (Schoenfeld Residuals)
+#### Run cox.zph() to test PH assumption
+ph_ti_test <- cox.zph(cox_ti_final)
+#### Convert cox.zph output to a data frame
+ph_ti_df <- as.data.frame(ph_ti_test$table)
+ph_ti_df$Covariate <- rownames(ph_ti_df)
+colnames(ph_ti_df) <- c("rho", "chisq", "p", "Covariate")
+ph_ti_global <- ph_ti_df[ph_ti_df$Covariate == "GLOBAL", ]
+ph_ti_df <- ph_ti_df[ph_ti_df$Covariate != "GLOBAL", ]
+
+gt(ph_ti_df) %>%
+  gt::tab_header(title = md("**Table A3. Cox time-independent model - 
+                            Schoenfeld Residual Test for Proportional Hazards**")) %>%
+  fmt_number(columns = c("rho", "chisq", "p"), decimals = 4) %>%
+  cols_label(
+    Covariate = "Covariate",
+    rho = "Correlation (ρ)",
+    chisq = "Chi-squared",
+    p = "p-value"
+  ) %>%
+  data_color(
+    columns = vars(p),
+    colors = scales::col_bin(
+      bins = c(0, 0.05, 1), 
+      palette = c("tomato", "gray90")
+    )
+  ) %>%
+  tab_source_note(md(paste0("**GLOBAL TEST**: χ² = ", 
+                            round(ph_ti_global$chisq, 2), 
+                            ", p = ", 
+                            round(ph_ti_global$p, 4))))
+
+## Color	Meaning
+# Tomato	 p < 0.05 → potential PH violation
+# Gray90	 p ≥ 0.05 → no significant violation
+```
+
+
+```{r}
+# -------------------------------------------------
+# Time dependent Cox model - Model Diagnostics
+# -------------------------------------------------
+
+## Influential observations
+# DFBETAs (for each covariate)
+dfb_td <- residuals(cox_td_final, type = "dfbeta")
+colnames(dfb_td) <- names(coef(cox_td_final))
+dfb_td_df <- as.data.frame(dfb_td)
+dfb_td_df$Observation <- 1:nrow(dfb_td_df)
+
+dfb_td_long <- pivot_longer(dfb_td_df, -Observation, names_to = "Covariate", 
+                            values_to = "DFBETA")
+dfb_td_extreme <- dfb_td_long %>%
+  filter(abs(DFBETA) > 0.5)
+
+dfb_td_extreme_summary <- dfb_td_extreme %>%
+  group_by(Covariate) %>%
+  summarise(
+    n_extreme = n(),
+    Obs_IDs = paste(unique(Observation), collapse = ", "),
+    .groups = "drop"
+  )
+
+dfb_td_extreme_summary %>%
+  gt() %>%
+  tab_header(title = md("**Table A4: Influential Observations in Time-Dependent Cox Model**")) %>%
+  cols_label(
+    Covariate = "Covariate",
+    n_extreme = "# Influential Obs",
+    Obs_IDs = "Observation IDs"
+  ) %>%
+  tab_options(table.font.size = "small")
+
+### Schoenfeld Residual Test for TD
+ph_td_test <- cox.zph(cox_td_final)
+ph_td_df <- as.data.frame(ph_td_test$table)
+ph_td_df$Covariate <- rownames(ph_td_df)
+colnames(ph_td_df) <- c("rho", "chisq", "p", "Covariate")
+ph_td_global <- ph_td_df[ph_td_df$Covariate == "GLOBAL", ]
+ph_td_df <- ph_td_df[ph_td_df$Covariate != "GLOBAL", ]
+
+gt(ph_td_df) %>%
+  tab_header(title = md("**Table A5: Schoenfeld Residuals for TD Cox Model**")) %>%
+  fmt_number(columns = c("rho", "chisq", "p"), decimals = 4) %>%
+  cols_label(
+    Covariate = "Covariate",
+    rho = "Correlation (ρ)",
+    chisq = "Chi-squared",
+    p = "p-value"
+  ) %>%
+  data_color(
+    columns = vars(p),
+    colors = scales::col_bin(bins = c(0, 0.05, 1), palette = c("tomato", "gray90"))
+  ) %>%
+  tab_source_note(md(paste0("**GLOBAL TEST**: χ² = ", 
+                            round(ph_td_global$chisq, 2), 
+                            ", p = ", 
+                            round(ph_td_global$p, 4))))
+```
