@@ -4,22 +4,20 @@ This is a practice of survival analysis concepts on an existing dataset, analysi
 ---
 
 ## Repository Structure
-.
+
 ├── LICENSE
 ├── README.md
-├── rendered_docs # Contains all the processed docs
-│   ├── Appendix_Rajaram.pdf
-│   ├── Codes_Rajaram_1.pdf
-│   ├── Codes_Rajaram.pdf
-│   └── Project_Rajaram.pdf
-├── RMD # All the codes used for analysis, visualization and interpretation
-│   ├── Appendix_Rajaram.rmd
-│   ├── Codes_Rajaram_1.rmd
-│   ├── Codes_Rajaram.rmd
-│   └── Project_Rajaram.rmd
-└── survival_analysis_practice.Rproj
-
-2 directories, 11 files
+├── rendered_docs/                  # Contains all the processed reports
+│   ├── Appendix_Rajaram.pdf
+│   ├── Codes_Rajaram_1.pdf
+│   ├── Codes_Rajaram.pdf
+│   └── Project_Rajaram.pdf
+├── RMD/                            # All the RMarkdown files for code, analysis, and interpretation
+│   ├── Appendix_Rajaram.rmd
+│   ├── Codes_Rajaram_1.rmd
+│   ├── Codes_Rajaram.rmd
+│   └── Project_Rajaram.rmd
+└── survival_analysis_practice.Rproj  # RStudio project file
 
 ---
 
