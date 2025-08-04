@@ -1,4 +1,7 @@
 # Survival Analysis Practice
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16738872.svg)](https://doi.org/10.5281/zenodo.16738871)
+
 This repository presents a complete survival analysis of HIV patients who experienced failure with zidovudine therapy, using the `aids` and `aids.id` datasets from the `JM` package. The project showcases not only advanced modeling but also careful data exploration, assumption checking, and clear interpretation using reproducible R workflows.
 
 ---
